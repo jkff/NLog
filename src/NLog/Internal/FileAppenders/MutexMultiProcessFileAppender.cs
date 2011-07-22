@@ -100,9 +100,9 @@ namespace NLog.Internal.FileAppenders
                 return;
             }
 
-            this.mutex.WaitOne();
             try
             {
+                this.mutex.WaitOne();
                 this.file.Seek(0, SeekOrigin.End);
                 this.file.Write(bytes, 0, bytes.Length);
                 this.file.Flush();
