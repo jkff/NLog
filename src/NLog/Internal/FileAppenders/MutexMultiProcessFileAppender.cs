@@ -102,7 +102,17 @@ namespace NLog.Internal.FileAppenders
 
             try
             {
-                this.mutex.WaitOne();
+                try
+                {
+                    this.mutex.WaitOne();
+                }
+                catch(AbandonedMutexException)
+                {
+                    // Ignore - mutex is owned, though (acc.to documentation  
+                    // of AbandonedMutexException). Presumably another process
+                    // writing to the same log was killed in the middle 
+                    // of this try/finally block.
+                }
                 this.file.Seek(0, SeekOrigin.End);
                 this.file.Write(bytes, 0, bytes.Length);
                 this.file.Flush();
