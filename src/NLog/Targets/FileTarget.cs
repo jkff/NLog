@@ -64,6 +64,8 @@ namespace NLog.Targets
         private Timer autoClosingTimer;
         private int initializedFilesCounter;
 
+        private Mutex mutex;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="FileTarget" /> class.
         /// </summary>
@@ -532,6 +534,14 @@ namespace NLog.Targets
                     this.OpenFileCacheTimeout * 1000);
             }
 
+            try
+            {
+                this.mutex = new Mutex(false, "NLog-archive-mutex-" + FileName);
+            }
+            catch
+            {
+            }
+
             // Console.Error.WriteLine("Name: {0} Factory: {1}", this.Name, this.appenderFactory.GetType().FullName);
         }
 
@@ -564,6 +574,12 @@ namespace NLog.Targets
                 this.recentAppenders[i].Close();
                 this.recentAppenders[i] = null;
             }
+
+            if(this.mutex != null)
+            {
+                this.mutex.Close();
+                this.mutex = null;
+            }
         }
 
         /// <summary>
@@ -579,7 +595,7 @@ namespace NLog.Targets
             if (this.ShouldAutoArchive(fileName, logEvent, bytes.Length))
             {
                 this.InvalidateCacheItem(fileName);
-                this.DoAutoArchive(fileName, logEvent);
+                this.DoAutoArchive(fileName, logEvent, bytes.Length);
             }
 
             this.WriteToFile(fileName, bytes, false);
@@ -680,7 +696,7 @@ namespace NLog.Targets
                     {
                         this.WriteFooterAndUninitialize(currentFileName);
                         this.InvalidateCacheItem(currentFileName);
-                        this.DoAutoArchive(currentFileName, firstLogEvent);
+                        this.DoAutoArchive(currentFileName, firstLogEvent, (int)ms.Length);
                     }
 
                     this.WriteToFile(currentFileName, ms.ToArray(), false);
@@ -817,37 +833,69 @@ namespace NLog.Targets
             File.Move(fileName, newFileName);
         }
 
-        private void DoAutoArchive(string fileName, LogEventInfo ev)
+        private void DoAutoArchive(string fileName, LogEventInfo ev, int upcomingWriteSize)
         {
-            var fi = new FileInfo(fileName);
-            if (!fi.Exists)
+            try
             {
-                return;
+                try
+                {
+                    mutex.WaitOne();
+                }
+                catch (AbandonedMutexException)
+                {
+                    // ignore the exception, another process was killed without properly releasing the mutex
+                    // the mutex has been acquired, so proceed to writing
+                    // See: http://msdn.microsoft.com/en-us/library/system.threading.abandonedmutexexception.aspx
+                }
+
+                if (!ShouldAutoArchive(fileName, ev, upcomingWriteSize))
+                    return;
+
+                var fi = new FileInfo(fileName);
+                if (!fi.Exists)
+                {
+                    return;
+                }
+
+                // Console.WriteLine("DoAutoArchive({0})", fileName);
+                string fileNamePattern;
+
+                if (this.ArchiveFileName == null)
+                {
+                    string ext = Path.GetExtension(fileName);
+                    fileNamePattern = Path.ChangeExtension(fi.FullName, ".{#}" + ext);
+                }
+                else
+                {
+                    fileNamePattern = this.ArchiveFileName.Render(ev);
+                }
+
+                switch (this.ArchiveNumbering)
+                {
+                    case ArchiveNumberingMode.Rolling:
+                        this.RecursiveRollingRename(fi.FullName, fileNamePattern, 0);
+                        break;
+
+                    case ArchiveNumberingMode.Sequence:
+                        this.SequentialArchive(fi.FullName, fileNamePattern);
+                        break;
+                }
             }
-
-            // Console.WriteLine("DoAutoArchive({0})", fileName);
-            string fileNamePattern;
-
-            if (this.ArchiveFileName == null)
+            finally
             {
-                string ext = Path.GetExtension(fileName);
-                fileNamePattern = Path.ChangeExtension(fi.FullName, ".{#}" + ext);
+                mutex.ReleaseMutex();
             }
-            else
-            {
-                fileNamePattern = this.ArchiveFileName.Render(ev);
-            }
+        }
 
-            switch (this.ArchiveNumbering)
-            {
-                case ArchiveNumberingMode.Rolling:
-                    this.RecursiveRollingRename(fi.FullName, fileNamePattern, 0);
-                    break;
+        private static string GetArchiveMutexName(string fileName)
+        {
+            string canonicalName = Path.GetFullPath(fileName).ToUpper(CultureInfo.InvariantCulture);
 
-                case ArchiveNumberingMode.Sequence:
-                    this.SequentialArchive(fi.FullName, fileNamePattern);
-                    break;
-            }
+            canonicalName = canonicalName.Replace('\\', '_');
+            canonicalName = canonicalName.Replace('/', '_');
+            canonicalName = canonicalName.Replace(':', '_');
+
+            return "NLog-archive-mutex-" + canonicalName;
         }
 
         private bool ShouldAutoArchive(string fileName, LogEventInfo ev, int upcomingWriteSize)
